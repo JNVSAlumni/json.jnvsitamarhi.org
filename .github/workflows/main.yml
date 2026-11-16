@@ -1,4 +1,4 @@
-name: Build and Deploy
+name: Social Feed
 on:
   workflow_dispatch:
   schedule:
@@ -8,26 +8,11 @@ permissions:
   contents: write
 jobs:
   build-and-deploy:
-    concurrency: ci-${{ github.ref }} # Recommended if you intend to make multiple deployments in quick succession.
+    concurrency: ci-${{ github.ref }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v3
-      - name: Fetch Accounts Data 📦
-        uses: JamesIves/fetch-api-data-action@v2
-        with:
-          endpoint: https://script.google.com/macros/s/AKfycbzGS-NsFvOXmnWs_SCm16ccWJyiXiYEnsTh5ZV3jbCuvELsYIMD/exec
-          configuration: '{ "method": "GET"}'
-          save-location: dist
-          save-name: accounts
-      - name: Fetch Blogs Summary 📦
-        uses: JamesIves/fetch-api-data-action@v2
-        with:
-          endpoint: https://www.jnvsitamarhi.org/feeds/posts/summary?alt=json&amp;max-results=99999
-          configuration: '{ "method": "GET"}'
-          save-location: dist
-          save-name: blogs
-
+        uses: actions/checkout@v4
       # Latest Facebook + Instagram post links -> https://json.jnvsitamarhi.org/social-feed.json
       # Needs repo secret FB_PAGE_TOKEN (never-expiring Facebook Page access token).
       # Never fails the job: if the API errors, the previously published links are kept.
