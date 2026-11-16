@@ -15,8 +15,9 @@ jobs:
         uses: actions/checkout@v4
       # Latest Facebook + Instagram post links -> https://json.jnvsitamarhi.org/social-feed.json
       # Needs repo secret FB_PAGE_TOKEN (never-expiring Facebook Page access token).
-      # Never fails the job: if the API errors, the previously published links are kept.
+      # Never fails the job. If nothing new is fetched, Deploy is skipped and the published JSON stays as is.
       - name: Fetch Social Feed 📱
+        id: feed
         env:
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           FB_POST_LIMIT: "10"
@@ -46,10 +47,17 @@ jobs:
                   err = json.loads(e.read() or b"{}").get("error", {})
                   raise RuntimeError(f"{path}: HTTP {e.code} {err.get('type', '')} {err.get('message', '')}") from None
 
+          def done(changed):
+              with open(os.environ.get("GITHUB_OUTPUT", os.devnull), "a") as f:
+                  f.write(f"changed={'true' if changed else 'false'}\n")
+              raise SystemExit(0)
+
           try:
               previous = get_json(LIVE)
-          except Exception:
-              previous = {}
+              live_ok = True
+          except Exception as e:
+              previous, live_ok = {}, False
+              warn(f"Could not read {LIVE}: {e}")
 
           def facebook():
               data = graph("me/posts", fields="permalink_url,created_time", limit=os.environ["FB_POST_LIMIT"])["data"]
@@ -69,28 +77,41 @@ jobs:
                       urls.append(link.rstrip("/") + "/")
               return urls
 
-          feed = {"facebook": previous.get("facebook", []), "instagram": previous.get("instagram", [])}
           if not token:
-              warn("FB_PAGE_TOKEN secret is not set - keeping previously published posts.")
-          else:
-              for name, fetch in (("facebook", facebook), ("instagram", instagram)):
-                  try:
-                      items = fetch()
-                      if items:
-                          feed[name] = items
-                      else:
-                          warn(f"{name}: API returned no posts - keeping previous list.")
-                  except Exception as e:
-                      warn(f"{name}: {e} - keeping previous list.")
+              warn("FB_PAGE_TOKEN secret is not set - published JSON left as is.")
+              done(False)
+
+          feed = {"facebook": previous.get("facebook", []), "instagram": previous.get("instagram", [])}
+          fetched = 0
+          for name, fetch in (("facebook", facebook), ("instagram", instagram)):
+              try:
+                  items = fetch()
+                  if items:
+                      feed[name] = items
+                      fetched += 1
+                  else:
+                      warn(f"{name}: API returned no posts - keeping previous list.")
+              except Exception as e:
+                  warn(f"{name}: {e} - keeping previous list.")
+
+          # Skip deploy if nothing was fetched, nothing changed, or a platform failed and its old list couldn't be read
+          if not fetched or (fetched < 2 and not live_ok):
+              warn("Nothing new fetched - published JSON left as is.")
+              done(False)
+          if feed["facebook"] == previous.get("facebook") and feed["instagram"] == previous.get("instagram"):
+              print("No new posts - published JSON left as is.")
+              done(False)
 
           feed["updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
           os.makedirs("dist", exist_ok=True)
           with open(OUT, "w", encoding="utf-8") as f:
               json.dump(feed, f, indent=2)
           print(f"facebook={len(feed['facebook'])} instagram={len(feed['instagram'])} -> {OUT}")
+          done(True)
           PY
 
       - name: Deploy 🚀
+        if: steps.feed.outputs.changed == 'true'
         uses: JamesIves/github-pages-deploy-action@v4
         with:
           folder: dist
