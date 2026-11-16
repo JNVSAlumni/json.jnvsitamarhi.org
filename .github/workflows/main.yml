@@ -1,9 +1,9 @@
 name: Build and Deploy
-on:  
-  workflow_dispatch:  
+on:
+  workflow_dispatch:
   schedule:
     - cron: "*/15 * * * *"
-  
+
 permissions:
   contents: write
 jobs:
@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v3		
+        uses: actions/checkout@v3
       - name: Fetch Accounts Data 📦
         uses: JamesIves/fetch-api-data-action@v2
         with:
@@ -27,6 +27,84 @@ jobs:
           configuration: '{ "method": "GET"}'
           save-location: dist
           save-name: blogs
+
+      # Latest Facebook + Instagram post links -> https://json.jnvsitamarhi.org/social-feed.json
+      # Needs repo secret FB_PAGE_TOKEN (never-expiring Facebook Page access token).
+      # Never fails the job: if the API errors, the previously published links are kept.
+      - name: Fetch Social Feed 📱
+        env:
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          FB_POST_LIMIT: "10"
+          IG_POST_LIMIT: "12"
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, re, urllib.error, urllib.parse, urllib.request
+
+          API = "https://graph.facebook.com/v21.0/"
+          LIVE = "https://json.jnvsitamarhi.org/social-feed.json"
+          OUT = "dist/social-feed.json"
+          token = os.environ.get("FB_PAGE_TOKEN", "").strip()
+
+          def warn(msg):
+              print(f"::warning title=Social feed::{msg}")
+
+          def get_json(url):
+              req = urllib.request.Request(url, headers={"User-Agent": "jnvs-social-feed"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          def graph(path, **params):
+              params["access_token"] = token
+              try:
+                  return get_json(API + path + "?" + urllib.parse.urlencode(params))
+              except urllib.error.HTTPError as e:
+                  err = json.loads(e.read() or b"{}").get("error", {})
+                  raise RuntimeError(f"{path}: HTTP {e.code} {err.get('type', '')} {err.get('message', '')}") from None
+
+          try:
+              previous = get_json(LIVE)
+          except Exception:
+              previous = {}
+
+          def facebook():
+              data = graph("me/posts", fields="permalink_url,created_time", limit=os.environ["FB_POST_LIMIT"])["data"]
+              return [p["permalink_url"] for p in data if p.get("permalink_url")]
+
+          def instagram():
+              page = graph("me", fields="instagram_business_account")
+              ig = (page.get("instagram_business_account") or {}).get("id")
+              if not ig:
+                  raise RuntimeError("Instagram account is not linked to the Facebook Page (must be a Professional account)")
+              data = graph(f"{ig}/media", fields="permalink,media_type,timestamp", limit=os.environ["IG_POST_LIMIT"])["data"]
+              urls = []
+              for m in data:
+                  link = m.get("permalink")
+                  if link:
+                      link = re.sub(r"instagram\.com/(reel|reels|tv)/", "instagram.com/p/", link.split("?")[0])
+                      urls.append(link.rstrip("/") + "/")
+              return urls
+
+          feed = {"facebook": previous.get("facebook", []), "instagram": previous.get("instagram", [])}
+          if not token:
+              warn("FB_PAGE_TOKEN secret is not set - keeping previously published posts.")
+          else:
+              for name, fetch in (("facebook", facebook), ("instagram", instagram)):
+                  try:
+                      items = fetch()
+                      if items:
+                          feed[name] = items
+                      else:
+                          warn(f"{name}: API returned no posts - keeping previous list.")
+                  except Exception as e:
+                      warn(f"{name}: {e} - keeping previous list.")
+
+          feed["updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+          os.makedirs("dist", exist_ok=True)
+          with open(OUT, "w", encoding="utf-8") as f:
+              json.dump(feed, f, indent=2)
+          print(f"facebook={len(feed['facebook'])} instagram={len(feed['instagram'])} -> {OUT}")
+          PY
+
       - name: Deploy 🚀
         uses: JamesIves/github-pages-deploy-action@v4
         with:
